@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+passlib[bcrypt]
+python-jose[cryptography]
+SQLAlchemy
+psycopg[binary]
+pydantic-settings
+sendgrid
