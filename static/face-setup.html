@@ -1,0 +1,114 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Face Setup (One-time)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+  <style>
+    body { max-width: 640px; margin: 20px auto; font-family: system-ui, Arial; }
+    h1 { font-size: 1.3rem; }
+    .box { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+    label { display:block; margin: 10px 0 4px; }
+    input[type="text"], input[type="number"] { width: 100%; padding: 8px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    img { max-width: 100%; display:block; margin-top: 8px; }
+    .msg { white-space: pre-wrap; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>Face Setup (One-time)</h1>
+
+  <div class="box">
+    <label>API base URL</label>
+    <input id="api" type="text" value="https://YOUR_API_BASE_URL" />
+
+    <label>Student ID (from your system)</label>
+    <input id="studentId" type="number" placeholder="e.g., 2" />
+
+    <label>Select a clear, front-facing photo</label>
+    <input id="file" type="file" accept="image/*" />
+
+    <img id="preview" alt="" />
+
+    <div style="margin-top:12px;">
+      <button id="go">Compute & Save My Face</button>
+    </div>
+  </div>
+
+  <p class="msg" id="out"></p>
+
+  <script>
+    // Use a CDN that hosts the model weights for face-api.js
+    // (no extra setup needed)
+    const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights";
+
+    const $ = (id) => document.getElementById(id);
+    const out = $("out");
+    const fileInput = $("file");
+    const preview = $("preview");
+
+    fileInput.addEventListener("change", () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      preview.src = url;
+    });
+
+    async function ensureModelsLoaded() {
+      out.textContent = "Loading face models (first time only)...";
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      out.textContent = "Models loaded.";
+    }
+
+    async function fileToImage(file) {
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = rej;
+        img.src = URL.createObjectURL(file);
+      });
+    }
+
+    $("go").addEventListener("click", async () => {
+      const api = $("api").value.trim().replace(/\/+$/,'');
+      const studentId = $("studentId").value.trim();
+      const file = fileInput.files?.[0];
+
+      if (!api) { out.textContent = "Enter API URL."; return; }
+      if (!studentId) { out.textContent = "Enter Student ID."; return; }
+      if (!file) { out.textContent = "Choose a photo."; return; }
+
+      try {
+        await ensureModelsLoaded();
+
+        out.textContent = "Detecting face...";
+        const img = await fileToImage(file);
+        const det = await faceapi
+          .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+
+        if (!det) { out.textContent = "No face found. Use a clear, front-facing photo."; return; }
+
+        const embedding = Array.from(det.descriptor);
+        out.textContent = "Saving your face vector...";
+
+        const r = await fetch(`${api}/api/photos/students/${studentId}/embedding`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ embedding })
+        });
+
+        const j = await r.json();
+        out.textContent = `Server response:\n` + JSON.stringify(j, null, 2);
+      } catch (e) {
+        console.error(e);
+        out.textContent = "Error: " + e.message;
+      }
+    });
+  </script>
+</body>
+</html>
