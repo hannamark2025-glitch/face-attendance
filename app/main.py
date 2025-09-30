@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List
 import os
 import psycopg
@@ -8,14 +8,24 @@ from datetime import datetime, timezone, timedelta
 
 app = FastAPI(title="Face Attendance API")
 
-# CORS: allow all for demo; tighten later
+# --- CORS (explicit origins; no credentials) ---
+ALLOWED_ORIGINS = [
+    "https://hannamark2025-glitch.github.io",          # your GitHub Pages site
+    "https://face-attendance-usgu.onrender.com",       # (optional) your API itself
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    allow_credentials=False,   # important: do NOT use True with "*" origins
+    max_age=86400,             # cache preflight 24h
 )
+
+# (Optional) handle any stray OPTIONS requests early
+@app.options("/{rest_of_path:path}")
+def preflight(rest_of_path: str):
+    return Response(status_code=204)
 
 @app.get("/")
 def health():
@@ -25,24 +35,23 @@ def health():
 def get_db_url() -> str:
     db_url = os.getenv("DB_URL")
     if not db_url:
-        # show a 500 on DB routes rather than crashing the server
         raise HTTPException(status_code=500, detail="DB_URL environment variable is not set")
     return db_url
 
 def db():
     return psycopg.connect(get_db_url(), autocommit=True)
 
-# ---- Models ----
+# ---- Models (keep it simple for OpenAPI & client) ----
 class EmbeddingIn(BaseModel):
-    embedding: List[float] = Field(default_factory=list)
+    embedding: List[float]
 
 # ---- Helpers ----
 def cosine_similarity(a: List[float], b: List[float]) -> float:
     if len(a) != len(b) or not a or not b:
         return -1.0
-    dot = sum(x*y for x, y in zip(a, b))
-    na = sum(x*x for x in a) ** 0.5
-    nb = sum(y*y for y in b) ** 0.5
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
     if na == 0 or nb == 0:
         return -1.0
     return dot / (na * nb)
@@ -64,12 +73,15 @@ def save_embedding(student_id: int, body: EmbeddingIn):
         if row[0] != "student":
             raise HTTPException(status_code=400, detail="User is not a student")
 
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO public.student_embeddings (student_id, embedding)
             VALUES (%s, %s)
             ON CONFLICT (student_id)
             DO UPDATE SET embedding = EXCLUDED.embedding, created_at = NOW()
-        """, (student_id, emb))
+            """,
+            (student_id, emb),
+        )
 
     return {"ok": True, "student_id": student_id, "saved_dims": len(emb)}
 
@@ -87,26 +99,35 @@ def checkin_vec(
         live = live[:128]
 
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""
+        # validate session belongs to course
+        cur.execute(
+            """
             SELECT start_time, late_after_minutes
             FROM public.sessions
             WHERE id=%s AND course_id=%s
-        """, (session_id, course_id))
+            """,
+            (session_id, course_id),
+        )
         s = cur.fetchone()
         if not s:
             raise HTTPException(status_code=404, detail="Session not found for course")
         start_time, late_after = s
 
-        cur.execute("""
+        # get enrolled students with embeddings
+        cur.execute(
+            """
             SELECT se.student_id, se.embedding
             FROM public.student_embeddings se
             JOIN public.enrollments e ON e.student_id = se.student_id
             WHERE e.course_id = %s
-        """, (course_id,))
+            """,
+            (course_id,),
+        )
         rows = cur.fetchall()
         if not rows:
             raise HTTPException(status_code=404, detail="No embeddings for this course")
 
+        # best cosine match
         best_id, best_sim = None, -1.0
         for sid, emb in rows:
             sim = cosine_similarity(live, emb)
@@ -116,16 +137,21 @@ def checkin_vec(
         if best_id is None or best_sim < 0.60:
             raise HTTPException(status_code=404, detail="No matching student")
 
+        # present/late
         now = datetime.now(timezone.utc)
         cutoff = start_time + timedelta(minutes=(late_after or 0))
         status = "present" if now <= cutoff else "late"
 
-        cur.execute("""
+        # upsert attendance (assumes UNIQUE(session_id, student_id))
+        cur.execute(
+            """
             INSERT INTO public.attendance (session_id, student_id, status, timestamp)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (session_id, student_id)
             DO UPDATE SET status = EXCLUDED.status, timestamp = NOW()
-        """, (session_id, best_id, status))
+            """,
+            (session_id, best_id, status),
+        )
 
     return {
         "ok": True,
@@ -135,3 +161,4 @@ def checkin_vec(
         "course_id": course_id,
         "session_id": session_id,
     }
+
