@@ -1,3 +1,6 @@
+import json
+from psycopg.types.json import Json   # <— NEW (psycopg3 helper for JSON)
+
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
