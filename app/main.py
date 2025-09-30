@@ -1,15 +1,14 @@
-# app/main.py  (or main.py if you prefer)
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List
 import os
 import psycopg
 from datetime import datetime, timezone, timedelta
 
 app = FastAPI(title="Face Attendance API")
 
-# CORS: allow all for demo; tighten later to your domain(s)
+# CORS: allow all for demo; tighten later
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,11 +21,11 @@ app.add_middleware(
 def health():
     return {"ok": True}
 
-# ---- Config / DB helper (lazy) ----
+# ---- DB helper (lazy; won't crash server at import) ----
 def get_db_url() -> str:
     db_url = os.getenv("DB_URL")
     if not db_url:
-        # Don't crash server at import; return 500 when a DB route is hit
+        # show a 500 on DB routes rather than crashing the server
         raise HTTPException(status_code=500, detail="DB_URL environment variable is not set")
     return db_url
 
@@ -35,7 +34,6 @@ def db():
 
 # ---- Models ----
 class EmbeddingIn(BaseModel):
-    # descriptor length is usually 128; we validate manually
     embedding: List[float] = Field(default_factory=list)
 
 # ---- Helpers ----
@@ -55,7 +53,6 @@ def save_embedding(student_id: int, body: EmbeddingIn):
     emb = body.embedding
     if not isinstance(emb, list) or len(emb) < 64:
         raise HTTPException(status_code=400, detail="Invalid embedding length")
-    # clamp to 128 to match typical face-api.js descriptor
     if len(emb) > 128:
         emb = emb[:128]
 
@@ -67,7 +64,6 @@ def save_embedding(student_id: int, body: EmbeddingIn):
         if row[0] != "student":
             raise HTTPException(status_code=400, detail="User is not a student")
 
-        # table: public.student_embeddings (create it once via SQL)
         cur.execute("""
             INSERT INTO public.student_embeddings (student_id, embedding)
             VALUES (%s, %s)
@@ -91,7 +87,6 @@ def checkin_vec(
         live = live[:128]
 
     with db() as conn, conn.cursor() as cur:
-        # validate session belongs to course
         cur.execute("""
             SELECT start_time, late_after_minutes
             FROM public.sessions
@@ -102,7 +97,6 @@ def checkin_vec(
             raise HTTPException(status_code=404, detail="Session not found for course")
         start_time, late_after = s
 
-        # get enrolled students with embeddings
         cur.execute("""
             SELECT se.student_id, se.embedding
             FROM public.student_embeddings se
@@ -113,23 +107,19 @@ def checkin_vec(
         if not rows:
             raise HTTPException(status_code=404, detail="No embeddings for this course")
 
-        # best cosine match
         best_id, best_sim = None, -1.0
         for sid, emb in rows:
             sim = cosine_similarity(live, emb)
             if sim > best_sim:
                 best_id, best_sim = sid, sim
 
-        # threshold for a 'good' match (tune 0.6–0.7 if needed)
         if best_id is None or best_sim < 0.60:
             raise HTTPException(status_code=404, detail="No matching student")
 
-        # present/late
         now = datetime.now(timezone.utc)
         cutoff = start_time + timedelta(minutes=(late_after or 0))
         status = "present" if now <= cutoff else "late"
 
-        # upsert attendance (assumes UNIQUE(session_id, student_id))
         cur.execute("""
             INSERT INTO public.attendance (session_id, student_id, status, timestamp)
             VALUES (%s, %s, %s, NOW())
@@ -145,5 +135,3 @@ def checkin_vec(
         "course_id": course_id,
         "session_id": session_id,
     }
-
-
