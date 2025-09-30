@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <title>Face Setup (One-time)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+  <!-- Load face-api.js with defer so it's ready before your code runs -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js" defer></script>
   <style>
     body { max-width: 640px; margin: 20px auto; font-family: system-ui, Arial; }
     h1 { font-size: 1.3rem; }
@@ -38,9 +39,8 @@
 
   <p class="msg" id="out"></p>
 
+  <!-- Your script comes last, guaranteed after face-api.js -->
   <script>
-    // Use a CDN that hosts the model weights for face-api.js
-    // (no extra setup needed)
     const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights";
 
     const $ = (id) => document.getElementById(id);
@@ -112,3 +112,4 @@
   </script>
 </body>
 </html>
+
