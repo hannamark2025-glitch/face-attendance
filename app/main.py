@@ -47,16 +47,25 @@ def db():
 class EmbeddingIn(BaseModel):
     embedding: List[float]
 
-# ---- Helpers ----
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    if len(a) != len(b) or not a or not b:
-        return -1.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(y * y for y in b) ** 0.5
-    if na == 0 or nb == 0:
-        return -1.0
-    return dot / (na * nb)
+def _normalize_pg_url(url: str) -> str:
+    # Render/other hosts sometimes hand out "postgres://"
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    # Ensure SSL (safe on most hosted PGs; harmless if already present)
+    if "sslmode=" not in url:
+        url += ("&" if "?" in url else "?") + "sslmode=require"
+    return url
+
+def get_db_url() -> str:
+    url = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+    if not url:
+        # keep the message explicit so it's obvious in logs
+        raise HTTPException(status_code=500, detail="Set DATABASE_URL (or DB_URL)")
+    return _normalize_pg_url(url)
+
+def db():
+    # psycopg 3.x
+    return psycopg.connect(get_db_url(), autocommit=True)
 
 # ===== 1) Save/Update a student's face embedding (stored as JSONB) =====
 @app.post("/api/students/{student_id}/embedding")
