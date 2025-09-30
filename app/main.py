@@ -58,16 +58,17 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
         return -1.0
     return dot / (na * nb)
 
-# ===== 1) Save/Update a student's face embedding =====
+# ===== 1) Save/Update a student's face embedding (stored as JSONB) =====
 @app.post("/api/students/{student_id}/embedding")
 def save_embedding(student_id: int, body: EmbeddingIn):
     emb = body.embedding
     if not isinstance(emb, list) or len(emb) < 64:
         raise HTTPException(status_code=400, detail="Invalid embedding length")
-    if len(emb) > 128:
-        emb = emb[:128]
+    # keep at most 128 dims (face-api.js descriptor length)
+    emb = emb[:128]
 
     with db() as conn, conn.cursor() as cur:
+        # validate user exists and is a student
         cur.execute("SELECT role FROM public.users WHERE id=%s", (student_id,))
         row = cur.fetchone()
         if not row:
@@ -75,6 +76,7 @@ def save_embedding(student_id: int, body: EmbeddingIn):
         if row[0] != "student":
             raise HTTPException(status_code=400, detail="User is not a student")
 
+        # store as JSONB using psycopg3's Json wrapper
         cur.execute(
             """
             INSERT INTO public.student_embeddings (student_id, embedding)
@@ -82,10 +84,11 @@ def save_embedding(student_id: int, body: EmbeddingIn):
             ON CONFLICT (student_id)
             DO UPDATE SET embedding = EXCLUDED.embedding, created_at = NOW()
             """,
-            (student_id, emb),
+            (student_id, Json(emb)),
         )
 
     return {"ok": True, "student_id": student_id, "saved_dims": len(emb)}
+
 
 # ===== 2) Match embedding & mark attendance =====
 @app.post("/api/attendance/checkin-vec")
@@ -97,11 +100,10 @@ def checkin_vec(
     live = body.embedding
     if not isinstance(live, list) or len(live) < 64:
         raise HTTPException(status_code=400, detail="Invalid embedding length")
-    if len(live) > 128:
-        live = live[:128]
+    live = live[:128]
 
     with db() as conn, conn.cursor() as cur:
-        # validate session belongs to course
+        # make sure this session belongs to the course
         cur.execute(
             """
             SELECT start_time, late_after_minutes
@@ -115,7 +117,7 @@ def checkin_vec(
             raise HTTPException(status_code=404, detail="Session not found for course")
         start_time, late_after = s
 
-        # get enrolled students with embeddings
+        # get embeddings for students enrolled in this course
         cur.execute(
             """
             SELECT se.student_id, se.embedding
@@ -129,13 +131,23 @@ def checkin_vec(
         if not rows:
             raise HTTPException(status_code=404, detail="No embeddings for this course")
 
-        # best cosine match
+        # psycopg3 will usually decode jsonb to Python lists automatically.
+        # But be defensive in case the driver returns a string.
         best_id, best_sim = None, -1.0
-        for sid, emb in rows:
+        for sid, emb_obj in rows:
+            if isinstance(emb_obj, str):
+                try:
+                    emb = json.loads(emb_obj)
+                except Exception:
+                    continue
+            else:
+                emb = emb_obj  # likely already a list from jsonb
+
             sim = cosine_similarity(live, emb)
             if sim > best_sim:
                 best_id, best_sim = sid, sim
 
+        # require a decent match
         if best_id is None or best_sim < 0.60:
             raise HTTPException(status_code=404, detail="No matching student")
 
@@ -144,7 +156,7 @@ def checkin_vec(
         cutoff = start_time + timedelta(minutes=(late_after or 0))
         status = "present" if now <= cutoff else "late"
 
-        # upsert attendance (assumes UNIQUE(session_id, student_id))
+        # upsert attendance (UNIQUE(session_id, student_id) assumed)
         cur.execute(
             """
             INSERT INTO public.attendance (session_id, student_id, status, timestamp)
@@ -163,4 +175,5 @@ def checkin_vec(
         "course_id": course_id,
         "session_id": session_id,
     }
+
 
