@@ -1,14 +1,15 @@
+# app/main.py  (or main.py if you prefer)
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, conlist
+from pydantic import BaseModel, Field
+from typing import List, Optional
 import os
 import psycopg
 from datetime import datetime, timezone, timedelta
-from typing import List
 
 app = FastAPI(title="Face Attendance API")
 
-# CORS: keep * for demo; later lock to your domain
+# CORS: allow all for demo; tighten later to your domain(s)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,22 +22,25 @@ app.add_middleware(
 def health():
     return {"ok": True}
 
-# ---- DB ----
-DB_URL = os.getenv("DB_URL")
-if not DB_URL:
-    raise RuntimeError("DB_URL env var is missing")
+# ---- Config / DB helper (lazy) ----
+def get_db_url() -> str:
+    db_url = os.getenv("DB_URL")
+    if not db_url:
+        # Don't crash server at import; return 500 when a DB route is hit
+        raise HTTPException(status_code=500, detail="DB_URL environment variable is not set")
+    return db_url
 
 def db():
-    return psycopg.connect(DB_URL, autocommit=True)
+    return psycopg.connect(get_db_url(), autocommit=True)
 
 # ---- Models ----
 class EmbeddingIn(BaseModel):
-    # face-api.js descriptor ~128 floats
-    embedding: conlist(float, min_items=64, max_items=256)
+    # descriptor length is usually 128; we validate manually
+    embedding: List[float] = Field(default_factory=list)
 
-# ---- Math (no numpy needed) ----
+# ---- Helpers ----
 def cosine_similarity(a: List[float], b: List[float]) -> float:
-    if len(a) != len(b):
+    if len(a) != len(b) or not a or not b:
         return -1.0
     dot = sum(x*y for x, y in zip(a, b))
     na = sum(x*x for x in a) ** 0.5
@@ -48,7 +52,13 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 # ===== 1) Save/Update a student's face embedding =====
 @app.post("/api/students/{student_id}/embedding")
 def save_embedding(student_id: int, body: EmbeddingIn):
-    emb = body.embedding[:128]  # clamp if longer
+    emb = body.embedding
+    if not isinstance(emb, list) or len(emb) < 64:
+        raise HTTPException(status_code=400, detail="Invalid embedding length")
+    # clamp to 128 to match typical face-api.js descriptor
+    if len(emb) > 128:
+        emb = emb[:128]
+
     with db() as conn, conn.cursor() as cur:
         cur.execute("SELECT role FROM public.users WHERE id=%s", (student_id,))
         row = cur.fetchone()
@@ -57,12 +67,14 @@ def save_embedding(student_id: int, body: EmbeddingIn):
         if row[0] != "student":
             raise HTTPException(status_code=400, detail="User is not a student")
 
+        # table: public.student_embeddings (create it once via SQL)
         cur.execute("""
             INSERT INTO public.student_embeddings (student_id, embedding)
             VALUES (%s, %s)
             ON CONFLICT (student_id)
             DO UPDATE SET embedding = EXCLUDED.embedding, created_at = NOW()
         """, (student_id, emb))
+
     return {"ok": True, "student_id": student_id, "saved_dims": len(emb)}
 
 # ===== 2) Match embedding & mark attendance =====
@@ -72,7 +84,12 @@ def checkin_vec(
     course_id: int = Query(...),
     session_id: int = Query(...),
 ):
-    live = body.embedding[:128]
+    live = body.embedding
+    if not isinstance(live, list) or len(live) < 64:
+        raise HTTPException(status_code=400, detail="Invalid embedding length")
+    if len(live) > 128:
+        live = live[:128]
+
     with db() as conn, conn.cursor() as cur:
         # validate session belongs to course
         cur.execute("""
@@ -103,15 +120,16 @@ def checkin_vec(
             if sim > best_sim:
                 best_id, best_sim = sid, sim
 
-        if best_id is None or best_sim < 0.60:  # tune threshold as needed
+        # threshold for a 'good' match (tune 0.6–0.7 if needed)
+        if best_id is None or best_sim < 0.60:
             raise HTTPException(status_code=404, detail="No matching student")
 
         # present/late
         now = datetime.now(timezone.utc)
-        cutoff = start_time + timedelta(minutes=late_after or 0)
+        cutoff = start_time + timedelta(minutes=(late_after or 0))
         status = "present" if now <= cutoff else "late"
 
-        # upsert attendance
+        # upsert attendance (assumes UNIQUE(session_id, student_id))
         cur.execute("""
             INSERT INTO public.attendance (session_id, student_id, status, timestamp)
             VALUES (%s, %s, %s, NOW())
@@ -119,7 +137,13 @@ def checkin_vec(
             DO UPDATE SET status = EXCLUDED.status, timestamp = NOW()
         """, (session_id, best_id, status))
 
-    return {"ok": True, "matched_student_id": best_id, "similarity": round(best_sim, 4),
-            "status": status, "course_id": course_id, "session_id": session_id}
+    return {
+        "ok": True,
+        "matched_student_id": best_id,
+        "similarity": round(best_sim, 4),
+        "status": status,
+        "course_id": course_id,
+        "session_id": session_id,
+    }
 
 
