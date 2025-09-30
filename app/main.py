@@ -8,18 +8,17 @@ from datetime import datetime, timezone, timedelta
 
 app = FastAPI(title="Face Attendance API")
 
-# --- CORS (explicit origins; no credentials) ---
-ALLOWED_ORIGINS = [
-    "https://hannamark2025-glitch.github.io",          # your GitHub Pages site
-    "https://face-attendance-usgu.onrender.com",       # (optional) your API itself
-]
+from fastapi.middleware.cors import CORSMiddleware
+
+# --- CORS: allow any origin, no credentials (safest to get you unblocked) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    allow_credentials=False,   # important: do NOT use True with "*" origins
-    max_age=86400,             # cache preflight 24h
+    allow_origin_regex=".*",         # allow ALL origins
+    allow_credentials=False,         # must be False when using "*" / regex
+    allow_methods=["*"],             # allow all HTTP methods
+    allow_headers=["*"],             # allow all headers
+    expose_headers=["*"],            # not required, but harmless
+    max_age=86400,                   # cache preflight 24h
 )
 
 # (Optional) handle any stray OPTIONS requests early
