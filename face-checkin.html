@@ -4,8 +4,6 @@
   <meta charset="utf-8" />
   <title>Class Check-in</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Make sure face-api.js loads before our script -->
-  <script src="https://cdn.jsdelivr.net/npm/face-api.js" defer></script>
   <style>
     body { max-width: 640px; margin: 20px auto; font-family: system-ui, Arial; }
     h1 { font-size: 1.3rem; }
@@ -42,7 +40,10 @@
     </div>
   </div>
 
-  <!-- Your script after face-api.js (faceapi is guaranteed to exist) -->
+  <!-- Load face-api.js first -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+
+  <!-- Then run your custom script -->
   <script>
     const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights";
     const $ = (id) => document.getElementById(id);
