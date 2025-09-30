@@ -47,24 +47,30 @@ def db():
 class EmbeddingIn(BaseModel):
     embedding: List[float]
 
+import os
+from fastapi import HTTPException
+import psycopg
+
 def _normalize_pg_url(url: str) -> str:
-    # Render/other hosts sometimes hand out "postgres://"
+    # Render sometimes gives postgres:// instead of postgresql://
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
-    # Ensure SSL (safe on most hosted PGs; harmless if already present)
+    # Ensure sslmode=require is always present
     if "sslmode=" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}sslmode=require"
     return url
 
 def get_db_url() -> str:
     url = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
     if not url:
-        # keep the message explicit so it's obvious in logs
-        raise HTTPException(status_code=500, detail="Set DATABASE_URL (or DB_URL)")
+        raise HTTPException(
+            status_code=500,
+            detail="Missing DB_URL / DATABASE_URL environment variable"
+        )
     return _normalize_pg_url(url)
 
 def db():
-    # psycopg 3.x
     return psycopg.connect(get_db_url(), autocommit=True)
 
 # ===== 1) Save/Update a student's face embedding (stored as JSONB) =====
@@ -97,7 +103,6 @@ def save_embedding(student_id: int, body: EmbeddingIn):
         )
 
     return {"ok": True, "student_id": student_id, "saved_dims": len(emb)}
-
 
 # ===== 2) Match embedding & mark attendance =====
 @app.post("/api/attendance/checkin-vec")
